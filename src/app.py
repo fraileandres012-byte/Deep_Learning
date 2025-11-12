@@ -3,7 +3,7 @@
 # 🎧 Fabrik DJ Style Classifier — Pro (Makina vs Newstyle)
 # -----------------------------------------------------------
 
-import os, sys, io
+import os, sys
 from pathlib import Path
 
 # Hacer importable "src/" tanto en local como en Streamlit Cloud
@@ -21,8 +21,7 @@ import matplotlib.pyplot as plt
 st.set_page_config(page_title="Fabrik DJ Style Classifier", page_icon="🎛️", layout="wide")
 st.markdown("""
 <style>
-/* Tipografía y tarjetas suaves */
-html, body, [class*="css"]  { font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, 'Helvetica Neue', Arial, 'Noto Sans', 'Apple Color Emoji','Segoe UI Emoji', 'Segoe UI Symbol'; }
+html, body, [class*="css"]  { font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, 'Helvetica Neue', Arial, 'Noto Sans'; }
 .block-container { padding-top: 1.5rem; padding-bottom: 2rem; }
 div.stButton > button, .stDownloadButton > button { border-radius: 12px; padding: 0.6rem 1rem; }
 [data-testid="stMetricValue"] { font-weight: 800; }
@@ -93,14 +92,27 @@ if model is None:
     st.warning("Sube un modelo `.h5` o añade `models/fabrik_makina_newstyle.h5` al repo.")
     st.stop()
 
-# ---------- Carga de audio ----------
+# ---------- Uploader (arreglo: aceptar cualquier MIME y filtrar por extensión) ----------
+from pathlib import Path as _P
+
+ALLOWED_EXTS = {".wav", ".wave", ".aif", ".aiff", ".flac", ".mp3", ".ogg", ".oga", ".m4a", ".aac"}
+
 colA, colB = st.columns([2, 1])
 with colA:
-    audio_file = st.file_uploader("Sube un audio (WAV recomendado; MP3/OGG/M4A suelen funcionar)", type=["wav", "mp3", "ogg", "m4a"])
+    audio_file = st.file_uploader(
+        "Sube un audio (WAV recomendado; también MP3/OGG/M4A/FLAC/AAC)",
+        type=None,                # no restringimos MIME
+        accept_multiple_files=False
+    )
 with colB:
-    st.info("💡 Consejo: si el archivo es largo, la app lo segmenta automáticamente y promedia probabilidades. Puedes regular **segmento** y **salto** en la barra lateral.")
+    st.info("💡 Si el archivo es largo, se segmenta automáticamente y se promedian probabilidades. Ajusta **segmento** y **salto** en la barra lateral.")
 
 if not audio_file:
+    st.stop()
+
+ext = _P(audio_file.name).suffix.lower()
+if ext not in ALLOWED_EXTS:
+    st.error(f"Formato no soportado ({ext}). Sube WAV/MP3/OGG/M4A/FLAC/AAC.")
     st.stop()
 
 st.audio(audio_file)
@@ -149,21 +161,18 @@ with tab1:
     st.subheader("🧠 ¿Por qué el modelo decide esto?")
     col1, col2 = st.columns([2, 1])
 
-    # Texto explicativo con evidencias
-    with col1:
-        # Elegimos el segmento más seguro (máx. confianza)
-        best_i = int(np.argmax(probs_per_window[:, pred_idx])) if len(probs_per_window) > 1 else 0
-        best_start = starts_s[best_i] if len(starts_s) else 0.0
-        best_prob = float(probs_per_window[best_i, pred_idx])
+    # Segmento más convincente
+    best_i = int(np.argmax(probs_per_window[:, pred_idx])) if len(probs_per_window) > 1 else 0
+    best_start = starts_s[best_i] if len(starts_s) else 0.0
+    best_prob = float(probs_per_window[best_i, pred_idx])
 
+    with col1:
         st.write(
             f"- El modelo predice **{pred_label}** con **{pred_conf:.1%}** de confianza promedio.\n"
             f"- La mayor evidencia aparece en el segmento **#{best_i}** (t ≈ **{best_start:.1f}s**), "
             f"con confianza **{best_prob:.1%}** para **{pred_label}**.\n"
-            f"- A continuación puedes ver el **mel-espectrograma** y una **mapa de atención (Grad-CAM)** que muestra las zonas de tiempo-frecuencia que más han contribuido."
+            f"- Debajo verás el **mel-espectrograma** y un **mapa de atención (Grad-CAM)** con las zonas de tiempo-frecuencia más influyentes."
         )
-
-    # Mini tabla con top-3 segmentos
     with col2:
         if len(probs_per_window) > 1:
             top_idx = np.argsort(-probs_per_window[:, pred_idx])[:3]
@@ -185,32 +194,22 @@ with tab2:
     })
     st.line_chart(timeline_df.set_index("t_inicio_s"))
     st.caption("Cada punto es un segmento de longitud fija. El promedio de toda la serie produce la predicción global.")
-
     csv = timeline_df.to_csv(index=False).encode("utf-8")
     st.download_button("⬇️ Descargar CSV de probabilidades", data=csv, file_name="segment_probs.csv")
 
 # Tab 3: Espectrograma & Grad-CAM
 with tab3:
     st.subheader("🎨 Evidencia visual: mel-espectrograma + Grad-CAM")
-    # Cargar audio y figura de mel del clip completo (hasta ~seg_len si es muy largo)
     y, sr = load_audio_wave(tmp_path, sr=SR)
-    # Si el audio es largo, mostramos solo los primeros seg_len segundos para un mel global rápido
+    # Vista parcial para mel global rápido
     max_samples = int(seg_len * sr)
     y_view = y[:max_samples] if len(y) > max_samples else y
 
-    # Mel global (vista rápida)
     fig_mel = mel_figure(y_view, sr=sr, n_mels=N_MELS, title="Mel-espectrograma (vista parcial)")
     st.pyplot(fig_mel, use_container_width=True)
 
-    # Grad-CAM sobre el segmento más convincente
     st.markdown("**Mapa de atención (Grad-CAM) sobre el segmento más representativo**")
-    # Preparamos entrada de ese segmento concreto para Grad-CAM
-    if len(windows) == 0:
-        x_for_cam = file_to_model_input(tmp_path)
-    else:
-        x_for_cam = windows[best_i]  # (1,128,431,1)
-
-    # Nombre de la última capa conv
+    x_for_cam = file_to_model_input(tmp_path) if len(windows) == 0 else windows[best_i]
     conv_name = last_conv_layer_name(model)
     if conv_name is None:
         st.warning("No se encontró una capa Conv2D en el modelo para Grad-CAM.")
@@ -218,9 +217,9 @@ with tab3:
         heat = gradcam_heatmap(model, x_for_cam, conv_name, class_index=pred_idx, upsample_to=(N_MELS, FIXED_TIME_FRAMES))
         fig_cam = overlay_gradcam_on_mel(x_for_cam[0, :, :, 0], heat, labels=LABELS, pred_idx=pred_idx)
         st.pyplot(fig_cam, use_container_width=True)
-        st.caption("Las zonas en rojo/amarillo indican regiones tiempo-frecuencia que más contribuyeron a la clase predicha.")
+        st.caption("Rojo/amarillo = regiones tiempo-frecuencia que más contribuyeron a la clase predicha.")
 
-# Tab 4: Métricas de audio (BPM, centroide, rolloff…)
+# Tab 4: Métricas de audio
 with tab4:
     st.subheader("🧪 Métricas de audio")
     feats = compute_basic_features(y, sr)
@@ -236,4 +235,4 @@ with tab4:
     )
 
 st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
-st.caption("© Fabrik DJ Style Classifier — Demo educativa. Para mejores resultados, entrena con más horas por estilo y valida por sesión/tema.")
+st.caption("© Fabrik DJ Style Classifier — Demo educativa. Para mejores resultados: más horas por estilo y validación por sesión/tema.")
