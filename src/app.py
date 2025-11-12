@@ -3,7 +3,7 @@
 # 🎧 Fabrik DJ Style Classifier — Pro (Makina vs Newstyle)
 # -----------------------------------------------------------
 
-import os, sys, io, zipfile, tempfile, requests
+import os, sys, io, zipfile, tempfile, requests, traceback
 from pathlib import Path
 
 # Import path para "src/"
@@ -22,7 +22,7 @@ st.set_page_config(page_title="Fabrik DJ Style Classifier", page_icon="🎛️",
 st.markdown("""
 <style>
 html, body, [class*="css"]  { font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, 'Helvetica Neue', Arial, 'Noto Sans'; }
-.block-container { padding-top: 1.2rem; padding-bottom: 1.2rem; }
+.block-container { padding-top: 1.1rem; padding-bottom: 1.1rem; }
 div.stButton > button, .stDownloadButton > button { border-radius: 12px; padding: 0.55rem 1rem; }
 [data-testid="stMetricValue"] { font-weight: 800; }
 .hr { border: 0; height: 1px; background: linear-gradient(90deg, transparent, rgba(255,255,255,.18), transparent); margin: .6rem 0 1rem 0; }
@@ -35,14 +35,16 @@ try:
         SR, N_MELS, FIXED_TIME_FRAMES, LABELS,
         file_to_model_input, segment_long_audio_for_model,
         mel_figure, overlay_gradcam_on_mel, compute_basic_features,
-        last_conv_layer_name, gradcam_heatmap, load_audio_wave
+        last_conv_layer_name, gradcam_heatmap, load_audio_wave,
+        generate_demo_wave, safe_load_path
     )
 except ModuleNotFoundError:
     from audio_utils import (
         SR, N_MELS, FIXED_TIME_FRAMES, LABELS,
         file_to_model_input, segment_long_audio_for_model,
         mel_figure, overlay_gradcam_on_mel, compute_basic_features,
-        last_conv_layer_name, gradcam_heatmap, load_audio_wave
+        last_conv_layer_name, gradcam_heatmap, load_audio_wave,
+        generate_demo_wave, safe_load_path
     )
 
 # Fallback para Streamlit antiguos sin st.toggle
@@ -61,6 +63,7 @@ with st.sidebar:
     st.markdown("---")
     seg_len = st.slider("Duración segmento (s)", 5, 15, 10)
     hop_len = st.slider("Salto entre segmentos (s)", 1, seg_len, seg_len)
+    debug_mode = ui_toggle("Modo depuración (mostrar detalles de archivo/errores)", default=False, key="debug")
     st.caption("Para menos latencia: 5–10 s de segmento y hop de 1–2 s.")
 
 # Carga del modelo (cacheada)
@@ -83,149 +86,129 @@ else:
     model = None
 
 st.title("🎧 Fabrik DJ Style Classifier — **Pro**")
-st.markdown("Identifica **Makina** vs **Newstyle** con explicaciones visuales (mel, **Grad-CAM**), timeline por segmentos y métricas.")
+st.markdown("Identifica **Makina** vs **Newstyle** con mel, **Grad-CAM**, timeline por segmentos y métricas.")
 
 if model is None:
     st.warning("Sube un modelo `.h5` o añade `models/fabrik_makina_newstyle.h5` al repo.")
     st.stop()
 
-# ---------- Entrada de audio: Archivo / URL / Demo interno ----------
-ALLOWED_EXTS = {".wav", ".wave", ".aif", ".aiff", ".flac", ".mp3", ".ogg", ".oga", ".m4a", ".aac"}
+# ---------- Entrada de audio: Archivo / URL / Demo interna ----------
 input_mode = st.radio("Cómo quieres cargar el audio:", ["Subir archivo", "Pegar URL", "Usar demo (5 s)"], horizontal=True)
-
 tmp_path = None
 
-if input_mode == "Subir archivo":
-    # Acepta cualquier MIME en el selector (evita "audio/wav not allowed")
-    file = st.file_uploader(
-        "Sube un audio (WAV recomendado; también MP3/OGG/M4A/FLAC/AAC). ZIP soportado.",
-        type=None, accept_multiple_files=False
-    )
-    if not file:
-        st.stop()
+def save_temp_bytes(data: bytes, suffix: str):
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(data)
+        tmp.flush()
+        return tmp.name
 
-    name = file.name
-    ext = Path(name).suffix.lower()
+try:
+    if input_mode == "Subir archivo":
+        # Sin restricciones de MIME: evitamos "audio/xxx not allowed"
+        file = st.file_uploader("Sube un audio (WAV/MP3/OGG/M4A/FLAC/AAC) o un ZIP con audio dentro.", type=None)
+        if not file:
+            st.stop()
 
-    # Si es ZIP: extraer primer audio soportado
-    if ext == ".zip":
-        try:
-            b = io.BytesIO(file.read())
-            with zipfile.ZipFile(b) as z:
-                inner = None
+        raw = file.read()
+        name = file.name or "audio.bin"
+        ext = Path(name).suffix.lower()
+
+        # Si es ZIP: extraer primer audio que podamos leer
+        if ext == ".zip":
+            try:
+                z = zipfile.ZipFile(io.BytesIO(raw))
+                member = None
                 for info in z.infolist():
-                    if Path(info.filename).suffix.lower() in ALLOWED_EXTS:
-                        inner = info
+                    if not info.is_dir():
+                        member = info
                         break
-                if inner is None:
-                    st.error("El ZIP no contiene audio soportado.")
-                    st.stop()
-                data = z.read(inner)
-                with tempfile.NamedTemporaryFile(delete=False, suffix=Path(inner.filename).suffix.lower()) as tmp:
-                    tmp.write(data)
-                    tmp.flush()
-                    tmp_path = tmp.name
+                if member is None:
+                    raise ValueError("ZIP vacío.")
+                data = z.read(member)
+                # guardar con su extensión real (si no, .bin)
+                ext2 = Path(member.filename).suffix.lower() or ".bin"
+                tmp_path = save_temp_bytes(data, ext2)
+            except Exception as e:
+                if debug_mode: st.exception(e)
+                st.error(f"No se pudo leer el ZIP: {e}")
+                st.stop()
+        else:
+            # Guardar tal cual, sin filtrar por extensión
+            tmp_path = save_temp_bytes(raw, ext if ext else ".bin")
+
+        # Mostrar player si el host lo soporta
+        try:
+            st.audio(tmp_path)
         except Exception as e:
-            st.error(f"No se pudo leer el ZIP: {e}")
-            st.stop()
-    else:
-        # Guardar cualquier archivo y filtrar por extensión permitida
-        if ext not in ALLOWED_EXTS:
-            st.error(f"Formato no soportado ({ext}). Sube WAV/MP3/OGG/M4A/FLAC/AAC o un ZIP con audio.")
-            st.stop()
-        with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
-            tmp.write(file.read())
-            tmp.flush()
-            tmp_path = tmp.name
+            if debug_mode: st.warning(f"Player no disponible: {e}")
 
-    st.audio(tmp_path)
-
-elif input_mode == "Pegar URL":
-    url = st.text_input("Pega una URL directa a un audio (o a un ZIP con audio):")
-    if not url:
-        st.stop()
-    try:
+    elif input_mode == "Pegar URL":
+        url = st.text_input("Pega una URL directa (audio o ZIP con audio):")
+        if not url:
+            st.stop()
         r = requests.get(url, timeout=30)
         r.raise_for_status()
-        # Detectar por extensión de la URL
         ext = Path(url.split("?")[0]).suffix.lower()
-        # Si es ZIP, extraer primer audio soportado
         if ext == ".zip":
-            with zipfile.ZipFile(io.BytesIO(r.content)) as z:
-                inner = None
-                for info in z.infolist():
-                    if Path(info.filename).suffix.lower() in ALLOWED_EXTS:
-                        inner = info
-                        break
-                if inner is None:
-                    st.error("El ZIP no contiene audio soportado.")
-                    st.stop()
-                data = z.read(inner)
-                with tempfile.NamedTemporaryFile(delete=False, suffix=Path(inner.filename).suffix.lower()) as tmp:
-                    tmp.write(data)
-                    tmp.flush()
-                    tmp_path = tmp.name
+            z = zipfile.ZipFile(io.BytesIO(r.content))
+            member = None
+            for info in z.infolist():
+                if not info.is_dir():
+                    member = info
+                    break
+            if member is None:
+                st.error("ZIP vacío.")
+                st.stop()
+            data = z.read(member)
+            ext2 = Path(member.filename).suffix.lower() or ".bin"
+            tmp_path = save_temp_bytes(data, ext2)
         else:
-            # Guardar tal cual
-            with tempfile.NamedTemporaryFile(delete=False, suffix=ext if ext else ".bin") as tmp:
-                tmp.write(r.content)
-                tmp.flush()
-                tmp_path = tmp.name
+            tmp_path = save_temp_bytes(r.content, ext if ext else ".bin")
+        try:
+            st.audio(tmp_path)
+        except Exception as e:
+            if debug_mode: st.warning(f"Player no disponible: {e}")
+
+    else:  # Demo interna 5 s
+        y = generate_demo_wave(SR, 5.0)
+        import soundfile as sf
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
+            sf.write(tmp.name, y, SR, format='WAV', subtype='PCM_16')
+            tmp_path = tmp.name
         st.audio(tmp_path)
-    except Exception as e:
-        st.error(f"No se pudo descargar el audio: {e}")
-        st.stop()
 
-else:  # "Usar demo (5 s)"
-    # Genera un loop 4/4 de 5s y lo guarda como WAV
-    import soundfile as sf
-    sr = SR
-    dur = 5.0
-    t = np.arange(int(sr*dur)) / sr
-    y = np.zeros_like(t, dtype=np.float32)
-
-    bpm = 150
-    beat_int = 60.0 / bpm
-    f_kick = 55.0
-
-    for b in np.arange(0, dur, beat_int):
-        idx = t >= b
-        tb = t[idx] - b
-        env = np.exp(-tb * 30.0).astype(np.float32)
-        kick = (np.sin(2*np.pi*f_kick*tb).astype(np.float32)) * env
-        y[idx] += 0.8 * kick
-
-    rng = np.random.default_rng(7)
-    for b in np.arange(0, dur, beat_int):
-        start = b + beat_int/2.0
-        if start >= dur: break
-        mask = (t >= start) & (t < start + 0.04)
-        hat = rng.normal(0, 1, mask.sum()).astype(np.float32)
-        hat = np.diff(np.concatenate([[0.0], hat])).astype(np.float32)
-        y[mask] += 0.25 * hat
-
-    y = (0.9 * y / (np.max(np.abs(y)) + 1e-12)).astype(np.float32)
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
-        sf.write(tmp.name, y, sr, format='WAV', subtype='PCM_16')
-        tmp_path = tmp.name
-    st.audio(tmp_path)
+except Exception as up_e:
+    if debug_mode: st.exception(up_e)
+    st.error("No se pudo recibir el audio. Prueba la **Demo (5 s)** o una **URL**.")
+    st.stop()
 
 # ---------- Inferencia ----------
-windows, starts_s = segment_long_audio_for_model(tmp_path, segment_seconds=seg_len, hop_seconds=hop_len)
+try:
+    # Segmentación (model-ready)
+    windows, starts_s = segment_long_audio_for_model(tmp_path, segment_seconds=seg_len, hop_seconds=hop_len)
 
-if len(windows) == 0:
-    x = file_to_model_input(tmp_path)
-    probs = model.predict(x, verbose=0)[0]
-    probs_per_window = np.expand_dims(probs, 0)
-    starts_s = np.array([0.0])
-else:
-    probs_list = [model.predict(w, verbose=0)[0] for w in windows]
-    probs_per_window = np.stack(probs_list, axis=0)
+    if len(windows) == 0:
+        x = file_to_model_input(tmp_path)
+        probs = model.predict(x, verbose=0)[0]
+        probs_per_window = np.expand_dims(probs, 0)
+        starts_s = np.array([0.0])
+    else:
+        probs_list = [model.predict(w, verbose=0)[0] for w in windows]
+        probs_per_window = np.stack(probs_list, axis=0)
 
-mean_probs = probs_per_window.mean(axis=0)
-pred_idx = int(np.argmax(mean_probs))
-pred_label = LABELS[pred_idx]
-pred_conf = float(mean_probs[pred_idx])
+    mean_probs = probs_per_window.mean(axis=0)
+    pred_idx = int(np.argmax(mean_probs))
+    pred_label = LABELS[pred_idx]
+    pred_conf = float(mean_probs[pred_idx])
+
+except Exception as inf_e:
+    if debug_mode:
+        st.error("❌ Error en inferencia / lectura del audio:")
+        st.exception(inf_e)
+        st.code(traceback.format_exc())
+    else:
+        st.error("❌ Error procesando el audio. Activa 'Modo depuración' en la barra lateral para ver detalles.")
+    st.stop()
 
 # Header
 m1, m2, m3 = st.columns(3)
@@ -276,7 +259,7 @@ with tab2:
 
 with tab3:
     st.subheader("🎨 Mel-espectrograma & Grad-CAM")
-    y, sr = load_audio_wave(tmp_path, sr=SR)
+    y, sr = load_audio_wave(tmp_path, sr=SR)  # usa loader robusto
     max_samples = int(seg_len * sr)
     y_view = y[:max_samples] if len(y) > max_samples else y
     fig_mel = mel_figure(y_view, sr=sr, n_mels=N_MELS, title="Mel-espectrograma (vista parcial)")
