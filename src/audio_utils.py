@@ -10,7 +10,7 @@ import tensorflow as tf
 
 SR = 22050
 N_MELS = 128
-FIXED_TIME_FRAMES = 431  # ~10s con hop ≈512 (depende de parámetros por defecto de librosa)
+FIXED_TIME_FRAMES = 431  # ~10s con hop ≈512 (depende de parámetros de librosa)
 LABELS = ["makina", "newstyle"]
 
 # ---------- Carga y mels ----------
@@ -85,9 +85,7 @@ def overlay_gradcam_on_mel(mel_2d, heatmap_2d, labels, pred_idx, alpha=0.45):
 
 # ---------- Métricas de audio ----------
 def compute_basic_features(y, sr=SR):
-    # BPM (estimación)
-    tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
-    # Espectrales
+    tempo, _ = librosa.beat.beat_track(y=y, sr=sr)  # BPM estimado
     centroid = librosa.feature.spectral_centroid(y=y, sr=sr)
     rolloff = librosa.feature.spectral_rolloff(y=y, sr=sr, roll_percent=0.85)
     zcr = librosa.feature.zero_crossing_rate(y)
@@ -131,7 +129,7 @@ def gradcam_heatmap(model, x, conv_layer_name, class_index, upsample_to=(N_MELS,
 
     # Normalizar
     heatmap = tf.maximum(heatmap, 0) / (tf.reduce_max(heatmap) + 1e-8)
-    heatmap = heatmap[..., tf.newaxis]
+    heatmap = heatmap[..., np.newaxis]
 
     # Redimensionar al tamaño del mel de entrada (N_MELS, FIXED_TIME_FRAMES)
     heatmap = tf.image.resize(heatmap, upsample_to, method="bilinear").numpy().squeeze()
