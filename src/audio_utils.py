@@ -1,7 +1,4 @@
 # src/audio_utils.py
-# ------------------------------------------------
-# Utilidades de audio, features y visualización
-# ------------------------------------------------
 import numpy as np
 import librosa
 import librosa.display
@@ -10,10 +7,9 @@ import tensorflow as tf
 
 SR = 22050
 N_MELS = 128
-FIXED_TIME_FRAMES = 431  # ~10s con hop ≈512 (depende de parámetros de librosa)
+FIXED_TIME_FRAMES = 431
 LABELS = ["makina", "newstyle"]
 
-# ---------- Carga y mels ----------
 def load_audio_wave(path, sr=SR, mono=True):
     y, _ = librosa.load(path, sr=sr, mono=mono)
     return y, sr
@@ -38,14 +34,10 @@ def pad_or_crop_mel(mel, fixed_frames=FIXED_TIME_FRAMES):
 def file_to_model_input(path):
     mel = wav_to_logmel(path, sr=SR, n_mels=N_MELS)
     mel = pad_or_crop_mel(mel, FIXED_TIME_FRAMES)
-    x = mel[np.newaxis, ..., np.newaxis]  # (1,128,431,1)
+    x = mel[np.newaxis, ..., np.newaxis]
     return x
 
 def segment_long_audio_for_model(path, segment_seconds=10, hop_seconds=10):
-    """
-    Devuelve: lista de ventanas ya con forma (1,128,431,1) y
-    array de tiempos de inicio (s) para timeline.
-    """
     y, sr = load_audio_wave(path, sr=SR, mono=True)
     seg_len = int(segment_seconds * sr)
     hop_len = int(hop_seconds * sr)
@@ -60,7 +52,6 @@ def segment_long_audio_for_model(path, segment_seconds=10, hop_seconds=10):
         windows.append(mel[np.newaxis, ..., np.newaxis])
     return windows, (starts / sr)
 
-# ---------- Visualización ----------
 def mel_figure(y, sr=SR, n_mels=N_MELS, title="Mel-espectrograma"):
     mel = wav_to_logmel_from_wave(y, sr=sr, n_mels=n_mels)
     fig, ax = plt.subplots(figsize=(10, 3))
@@ -70,10 +61,6 @@ def mel_figure(y, sr=SR, n_mels=N_MELS, title="Mel-espectrograma"):
     return fig
 
 def overlay_gradcam_on_mel(mel_2d, heatmap_2d, labels, pred_idx, alpha=0.45):
-    """
-    mel_2d: (128, 431), heatmap_2d: (128, 431) en [0,1].
-    Devuelve figura con overlay del heatmap sobre el mel.
-    """
     fig, ax = plt.subplots(figsize=(10, 3))
     librosa.display.specshow(mel_2d, x_axis='time', y_axis='mel', sr=SR, ax=ax, cmap="magma")
     ax.imshow(heatmap_2d, aspect='auto', interpolation='nearest',
@@ -83,9 +70,8 @@ def overlay_gradcam_on_mel(mel_2d, heatmap_2d, labels, pred_idx, alpha=0.45):
     fig.tight_layout()
     return fig
 
-# ---------- Métricas de audio ----------
 def compute_basic_features(y, sr=SR):
-    tempo, _ = librosa.beat.beat_track(y=y, sr=sr)  # BPM estimado
+    tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
     centroid = librosa.feature.spectral_centroid(y=y, sr=sr)
     rolloff = librosa.feature.spectral_rolloff(y=y, sr=sr, roll_percent=0.85)
     zcr = librosa.feature.zero_crossing_rate(y)
@@ -96,9 +82,7 @@ def compute_basic_features(y, sr=SR):
         "zcr": float(np.mean(zcr)),
     }
 
-# ---------- Grad-CAM ----------
 def last_conv_layer_name(model):
-    """Encuentra el nombre de la última capa Conv2D del modelo."""
     for layer in reversed(model.layers):
         try:
             if isinstance(layer, tf.keras.layers.Conv2D):
@@ -108,30 +92,20 @@ def last_conv_layer_name(model):
     return None
 
 def gradcam_heatmap(model, x, conv_layer_name, class_index, upsample_to=(N_MELS, FIXED_TIME_FRAMES)):
-    """
-    x: (1, H, W, 1). Devuelve heatmap 2D normalizada (H,W) en [0,1].
-    """
     grad_model = tf.keras.models.Model(
         [model.inputs], [model.get_layer(conv_layer_name).output, model.output]
     )
-
     with tf.GradientTape() as tape:
         conv_output, preds = grad_model(x)
         if class_index is None:
             class_index = tf.argmax(preds[0])
         class_channel = preds[:, class_index]
-
     grads = tape.gradient(class_channel, conv_output)
     pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
-
-    conv_output = conv_output[0]  # (h, w, channels)
+    conv_output = conv_output[0]
     heatmap = tf.reduce_sum(tf.multiply(pooled_grads, conv_output), axis=-1)
-
-    # Normalizar
     heatmap = tf.maximum(heatmap, 0) / (tf.reduce_max(heatmap) + 1e-8)
     heatmap = heatmap[..., np.newaxis]
-
-    # Redimensionar al tamaño del mel de entrada (N_MELS, FIXED_TIME_FRAMES)
     heatmap = tf.image.resize(heatmap, upsample_to, method="bilinear").numpy().squeeze()
     heatmap = np.clip(heatmap, 0.0, 1.0)
     return heatmap
