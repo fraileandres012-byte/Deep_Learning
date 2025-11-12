@@ -1,19 +1,37 @@
 # src/audio_utils.py
 import numpy as np
-import librosa
-import librosa.display
+import librosa, librosa.display
 import matplotlib.pyplot as plt
 import tensorflow as tf
+import soundfile as sf
 
 SR = 22050
 N_MELS = 128
 FIXED_TIME_FRAMES = 431
 LABELS = ["makina", "newstyle"]
 
-def load_audio_wave(path, sr=SR, mono=True):
-    y, _ = librosa.load(path, sr=sr, mono=mono)
-    return y, sr
+# --- Loader robusto ---
+def safe_load_path(path, sr=SR, mono=True):
+    """
+    Intenta cargar con soundfile (WAV/FLAC/AIFF/OGG) y cae a librosa (audioread) si falla.
+    Devuelve (y, sr).
+    """
+    try:
+        data, srf = sf.read(path, always_2d=False)
+        if data.ndim == 2 and mono:
+            data = data.mean(axis=1)
+        if srf != sr:
+            data = librosa.resample(data.astype(np.float32), orig_sr=srf, target_sr=sr)
+        return data.astype(np.float32), sr
+    except Exception:
+        # Fallback genérico (MP3/otros contenedores): librosa/audioread
+        y, _ = librosa.load(path, sr=sr, mono=mono)
+        return y.astype(np.float32), sr
 
+def load_audio_wave(path, sr=SR, mono=True):
+    return safe_load_path(path, sr=sr, mono=mono)
+
+# --- Mel utils ---
 def wav_to_logmel_from_wave(y, sr=SR, n_mels=N_MELS):
     S = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=n_mels)
     logS = librosa.power_to_db(S, ref=np.max)
@@ -52,6 +70,7 @@ def segment_long_audio_for_model(path, segment_seconds=10, hop_seconds=10):
         windows.append(mel[np.newaxis, ..., np.newaxis])
     return windows, (starts / sr)
 
+# --- Visualización ---
 def mel_figure(y, sr=SR, n_mels=N_MELS, title="Mel-espectrograma"):
     mel = wav_to_logmel_from_wave(y, sr=sr, n_mels=n_mels)
     fig, ax = plt.subplots(figsize=(10, 3))
@@ -70,6 +89,7 @@ def overlay_gradcam_on_mel(mel_2d, heatmap_2d, labels, pred_idx, alpha=0.45):
     fig.tight_layout()
     return fig
 
+# --- Métricas básicas ---
 def compute_basic_features(y, sr=SR):
     tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
     centroid = librosa.feature.spectral_centroid(y=y, sr=sr)
@@ -82,6 +102,7 @@ def compute_basic_features(y, sr=SR):
         "zcr": float(np.mean(zcr)),
     }
 
+# --- Grad-CAM ---
 def last_conv_layer_name(model):
     for layer in reversed(model.layers):
         try:
@@ -109,3 +130,25 @@ def gradcam_heatmap(model, x, conv_layer_name, class_index, upsample_to=(N_MELS,
     heatmap = tf.image.resize(heatmap, upsample_to, method="bilinear").numpy().squeeze()
     heatmap = np.clip(heatmap, 0.0, 1.0)
     return heatmap
+
+# --- Generador demo 5s ---
+def generate_demo_wave(sr=SR, dur=5.0, bpm=150, f_kick=55.0):
+    t = np.arange(int(sr*dur)) / sr
+    y = np.zeros_like(t, dtype=np.float32)
+    beat_int = 60.0 / bpm
+    for b in np.arange(0, dur, beat_int):
+        idx = t >= b
+        tb = t[idx] - b
+        env = np.exp(-tb * 30.0).astype(np.float32)
+        kick = (np.sin(2*np.pi*f_kick*tb).astype(np.float32)) * env
+        y[idx] += 0.8 * kick
+    rng = np.random.default_rng(7)
+    for b in np.arange(0, dur, beat_int):
+        start = b + beat_int/2.0
+        if start >= dur: break
+        mask = (t >= start) & (t < start + 0.04)
+        hat = rng.normal(0, 1, mask.sum()).astype(np.float32)
+        hat = np.diff(np.concatenate([[0.0], hat])).astype(np.float32)
+        y[mask] += 0.25 * hat
+    y = (0.9 * y / (np.max(np.abs(y)) + 1e-12)).astype(np.float32)
+    return y
