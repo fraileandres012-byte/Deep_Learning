@@ -1,13 +1,11 @@
-# app.py (encabezado robusto de imports)
-import os, sys
+# src/app.py
+import sys
 from pathlib import Path
 
-# añade raíz del repo y src al sys.path para que funcione en local y en Streamlit Cloud
-ROOT = Path(__file__).resolve().parent
+# añade la carpeta raíz del repo al sys.path
+ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(ROOT / "src"))
 
-# ahora sí, importa tus utilidades
 from src.audio_utils import (
     file_to_model_input,
     segment_long_audio,
@@ -15,9 +13,9 @@ from src.audio_utils import (
     SR, N_MELS, FIXED_TIME_FRAMES, LABELS
 )
 
-import numpy as np
 import streamlit as st
 import tensorflow as tf
+import numpy as np
 import matplotlib.pyplot as plt
 
 
