@@ -1,4 +1,5 @@
-streamlit>=1.25.0
+# requirements.txt
+streamlit>=1.23
 numpy
 librosa>=0.10
 soundfile
@@ -6,3 +7,4 @@ scikit-learn
 tqdm
 tensorflow
 matplotlib
+pandas
