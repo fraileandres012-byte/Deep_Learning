@@ -1,17 +1,25 @@
-# app.py
-import os
-import tempfile
-import numpy as np
-import streamlit as st
-import tensorflow as tf
-import matplotlib.pyplot as plt
+# app.py (encabezado robusto de imports)
+import os, sys
+from pathlib import Path
 
+# añade raíz del repo y src al sys.path para que funcione en local y en Streamlit Cloud
+ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "src"))
+
+# ahora sí, importa tus utilidades
 from src.audio_utils import (
     file_to_model_input,
     segment_long_audio,
     probs_to_label,
     SR, N_MELS, FIXED_TIME_FRAMES, LABELS
 )
+
+import numpy as np
+import streamlit as st
+import tensorflow as tf
+import matplotlib.pyplot as plt
+
 
 st.set_page_config(page_title="Fabrik DJ Style Classifier", page_icon="🎧", layout="centered")
 
