@@ -29,7 +29,7 @@ div.stButton > button, .stDownloadButton > button { border-radius: 12px; padding
 </style>
 """, unsafe_allow_html=True)
 
-# Utilidades
+# Utilidades (desde src/audio_utils.py). Fallback al mismo nivel si no existe src/.
 try:
     from src.audio_utils import (
         SR, N_MELS, FIXED_TIME_FRAMES, LABELS,
@@ -73,23 +73,25 @@ with st.sidebar:
 @st.cache_resource(show_spinner=True)
 def _load_model_from_path(path: str):
     import h5py
-    # Validación ligera: si parece audio HDF5, corta
+    # Si parece un HDF5 de audio, avisar
     try:
         with h5py.File(path, "r") as f:
             if "waveform" in f.keys() and "sr" in f.keys():
                 raise ValueError("El archivo .h5 parece un AUDIO (datasets 'waveform'/'sr'), no un modelo Keras.")
     except OSError:
-        # No es HDF5, Keras puede manejar SavedModel dir/archivo .keras
+        # No es HDF5 (puede ser .keras o SavedModel empaquetado) → deja a Keras decidir
         pass
     return tf.keras.models.load_model(path)
 
 @st.cache_resource(show_spinner=True)
-def _load_model_from_bytes(uploaded_bytes: bytes):
+def _load_model_from_bytes(uploaded_bytes: bytes, orig_name: str):
     import h5py
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".h5") as tmp:
+    suffix = Path(orig_name).suffix or ".h5"  # conserva extensión original (.keras/.h5)
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
         tmp.write(uploaded_bytes)
         tmp.flush()
         tmp_path = tmp.name
+    # Validación de audio .h5
     try:
         with h5py.File(tmp_path, "r") as f:
             if "waveform" in f.keys() and "sr" in f.keys():
@@ -104,7 +106,7 @@ try:
     if use_repo_model and os.path.exists(default_model_path):
         model = _load_model_from_path(default_model_path)
     elif uploaded_model is not None:
-        model = _load_model_from_bytes(uploaded_model.getvalue())
+        model = _load_model_from_bytes(uploaded_model.getvalue(), uploaded_model.name)
 except Exception as e:
     st.error(
         "❌ No se pudo cargar el modelo.\n\n"
@@ -121,7 +123,7 @@ if model is None:
     st.stop()
 
 # ---------- Entrada de audio: Archivo / URL / Demo interna (AJUSTE ROBUSTO) ----------
-# Preselecciona demo (index=2). Puedes cambiar a index=0 si prefieres "Subir archivo".
+# Preselecciona demo (index=2). Cambia a index=0 si prefieres “Subir archivo”.
 input_mode = st.radio(
     "Cómo quieres cargar el audio:",
     ["Subir archivo", "Pegar URL", "Usar demo (5 s)"],
