@@ -59,45 +59,74 @@ with st.sidebar:
     st.markdown("## 🎛️ Configuración")
     default_model_path = "models/fabrik_makina_newstyle.h5"
     use_repo_model = ui_toggle("Usar modelo del repo", default=os.path.exists(default_model_path), key="use_repo")
-    uploaded_model = st.file_uploader("O sube un modelo (.h5)", type=["h5"], accept_multiple_files=False)
+    uploaded_model = st.file_uploader(
+        "O sube un **modelo Keras** (.h5 o .keras, NO audio .h5)",
+        type=["h5","keras"], accept_multiple_files=False
+    )
     st.markdown("---")
     seg_len = st.slider("Duración segmento (s)", 5, 15, 10)
     hop_len = st.slider("Salto entre segmentos (s)", 1, seg_len, seg_len)
     debug_mode = ui_toggle("Modo depuración (mostrar detalles de archivo/errores)", default=False, key="debug")
     st.caption("Para menos latencia: 5–10 s de segmento y hop de 1–2 s.")
 
-# Carga del modelo (cacheada)
+# ---------- Carga del modelo (con validación de .h5) ----------
 @st.cache_resource(show_spinner=True)
-def load_model(path=None, uploaded_bytes=None):
-    if path and os.path.exists(path):
-        return tf.keras.models.load_model(path)
-    if uploaded_bytes:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".h5") as tmp:
-            tmp.write(uploaded_bytes)
-            tmp.flush()
-            return tf.keras.models.load_model(tmp.name)
-    return None
+def _load_model_from_path(path: str):
+    import h5py
+    # Validación ligera: si parece audio HDF5, corta
+    try:
+        with h5py.File(path, "r") as f:
+            if "waveform" in f.keys() and "sr" in f.keys():
+                raise ValueError("El archivo .h5 parece un AUDIO (datasets 'waveform'/'sr'), no un modelo Keras.")
+    except OSError:
+        # No es HDF5, Keras puede manejar SavedModel dir/archivo .keras
+        pass
+    return tf.keras.models.load_model(path)
 
-if use_repo_model and os.path.exists(default_model_path):
-    model = load_model(path=default_model_path)
-elif uploaded_model is not None:
-    model = load_model(uploaded_bytes=uploaded_model.read())
-else:
-    model = None
+@st.cache_resource(show_spinner=True)
+def _load_model_from_bytes(uploaded_bytes: bytes):
+    import h5py
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".h5") as tmp:
+        tmp.write(uploaded_bytes)
+        tmp.flush()
+        tmp_path = tmp.name
+    try:
+        with h5py.File(tmp_path, "r") as f:
+            if "waveform" in f.keys() and "sr" in f.keys():
+                raise ValueError("Has subido un .h5 de audio. Sube un modelo Keras guardado con model.save(...).")
+    except OSError:
+        pass
+    return tf.keras.models.load_model(tmp_path)
+
+# Decide fuente del modelo con manejo de errores amigable
+model = None
+try:
+    if use_repo_model and os.path.exists(default_model_path):
+        model = _load_model_from_path(default_model_path)
+    elif uploaded_model is not None:
+        model = _load_model_from_bytes(uploaded_model.getvalue())
+except Exception as e:
+    st.error(
+        "❌ No se pudo cargar el modelo.\n\n"
+        "Asegúrate de subir un **modelo Keras** válido (guardado con `model.save('…')`).\n\n"
+        f"Detalle: {e}"
+    )
+    st.stop()
 
 st.title("🎧 Fabrik DJ Style Classifier — **Pro**")
 st.markdown("Identifica **Makina** vs **Newstyle** con mel, **Grad-CAM**, timeline por segmentos y métricas.")
 
 if model is None:
-    st.warning("Sube un modelo `.h5` o añade `models/fabrik_makina_newstyle.h5` al repo.")
+    st.warning("Sube un modelo `.h5`/`.keras` o añade `models/fabrik_makina_newstyle.h5` al repo y activa 'Usar modelo del repo'.")
     st.stop()
 
 # ---------- Entrada de audio: Archivo / URL / Demo interna (AJUSTE ROBUSTO) ----------
-if st.button("🎵 Probar demo (5 s)"):
-    st.session_state["force_demo"] = True
-if st.session_state.get("force_demo"):
-    input_mode = "Usar demo (5 s)"
-
+# Preselecciona demo (index=2). Puedes cambiar a index=0 si prefieres "Subir archivo".
+input_mode = st.radio(
+    "Cómo quieres cargar el audio:",
+    ["Subir archivo", "Pegar URL", "Usar demo (5 s)"],
+    horizontal=True, index=2
+)
 tmp_path = None
 
 # Formatos soportados SIN ffmpeg (Streamlit Cloud)
@@ -112,7 +141,6 @@ def save_temp_bytes(data: bytes, suffix: str):
 
 try:
     if input_mode == "Subir archivo":
-        # Sin restricciones de MIME: evitamos "audio/xxx not allowed"
         file = st.file_uploader(
             "Sube un audio (WAV/FLAC/OGG/AIFF recomendados) o un ZIP con audio. MP3/M4A/AAC no soportados en este entorno.",
             type=None, accept_multiple_files=False
@@ -124,7 +152,6 @@ try:
         name = file.name or "audio.bin"
         ext = Path(name).suffix.lower()
 
-        # Si es ZIP: extraer primer audio compatible
         if ext == ".zip":
             try:
                 z = zipfile.ZipFile(io.BytesIO(raw))
@@ -146,7 +173,6 @@ try:
                 st.error(f"No se pudo leer el ZIP: {e}")
                 st.stop()
         else:
-            # Filtrado de formatos por entorno (sin ffmpeg)
             if ext in LOSSY_BLOCK:
                 st.error("Este entorno no puede decodificar MP3/M4A/AAC. Convierte a WAV/FLAC/OGG/AIFF e inténtalo de nuevo.")
                 st.stop()
@@ -155,16 +181,14 @@ try:
                 st.stop()
             tmp_path = save_temp_bytes(raw, ext)
 
-        # Player (no bloquear si falla)
         try:
             st.audio(tmp_path)
         except Exception as e:
             if debug_mode: st.warning(f"Player no disponible: {e}")
 
-        # Depuración de entrada
         if debug_mode:
             st.write({"name": name, "ext": ext, "bytes": len(raw)})
-            import soundfile as sf
+            import soundfile as sf, librosa
             try:
                 y_sf, sr_sf = sf.read(tmp_path, always_2d=False)
                 st.success(f"[soundfile] OK — sr={sr_sf}, shape={np.shape(y_sf)}")
@@ -232,7 +256,6 @@ except Exception as up_e:
 
 # ---------- Inferencia ----------
 try:
-    # Segmentación (model-ready)
     windows, starts_s = segment_long_audio_for_model(tmp_path, segment_seconds=seg_len, hop_seconds=hop_len)
 
     if len(windows) == 0:
@@ -295,7 +318,7 @@ with tab1:
 
 with tab2:
     st.subheader("📈 Probabilidades por segmento")
-    # Nota: para 2 clases; si amplías LABELS, genera columnas dinámicas
+    # Dinámico para N clases
     timeline_df = pd.DataFrame({"t_inicio_s": starts_s})
     for i, lab in enumerate(LABELS):
         timeline_df[lab] = probs_per_window[:, i]
@@ -306,7 +329,7 @@ with tab2:
 
 with tab3:
     st.subheader("🎨 Mel-espectrograma & Grad-CAM")
-    y, sr = load_audio_wave(tmp_path, sr=SR)  # usa loader robusto
+    y, sr = load_audio_wave(tmp_path, sr=SR)
     max_samples = int(seg_len * sr)
     y_view = y[:max_samples] if len(y) > max_samples else y
     fig_mel = mel_figure(y_view, sr=sr, n_mels=N_MELS, title="Mel-espectrograma (vista parcial)")
