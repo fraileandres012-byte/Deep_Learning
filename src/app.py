@@ -92,9 +92,13 @@ if model is None:
     st.warning("Sube un modelo `.h5` o añade `models/fabrik_makina_newstyle.h5` al repo.")
     st.stop()
 
-# ---------- Entrada de audio: Archivo / URL / Demo interna ----------
+# ---------- Entrada de audio: Archivo / URL / Demo interna (AJUSTE ROBUSTO) ----------
 input_mode = st.radio("Cómo quieres cargar el audio:", ["Subir archivo", "Pegar URL", "Usar demo (5 s)"], horizontal=True)
 tmp_path = None
+
+# Formatos soportados SIN ffmpeg (Streamlit Cloud)
+LOSSY_BLOCK = {".mp3", ".m4a", ".aac"}  # suelen fallar en cloud sin ffmpeg
+LOSSLESS_OK = {".wav", ".wave", ".flac", ".ogg", ".oga", ".aiff", ".aif"}
 
 def save_temp_bytes(data: bytes, suffix: str):
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
@@ -105,42 +109,68 @@ def save_temp_bytes(data: bytes, suffix: str):
 try:
     if input_mode == "Subir archivo":
         # Sin restricciones de MIME: evitamos "audio/xxx not allowed"
-        file = st.file_uploader("Sube un audio (WAV/MP3/OGG/M4A/FLAC/AAC) o un ZIP con audio dentro.", type=None)
+        file = st.file_uploader(
+            "Sube un audio (WAV/FLAC/OGG/AIFF recomendados) o un ZIP con audio. MP3/M4A/AAC no soportados en este entorno.",
+            type=None, accept_multiple_files=False
+        )
         if not file:
             st.stop()
 
-        raw = file.read()
+        raw = file.getvalue()  # lee UNA vez
         name = file.name or "audio.bin"
         ext = Path(name).suffix.lower()
 
-        # Si es ZIP: extraer primer audio que podamos leer
+        # Si es ZIP: extraer primer audio compatible
         if ext == ".zip":
             try:
                 z = zipfile.ZipFile(io.BytesIO(raw))
                 member = None
                 for info in z.infolist():
-                    if not info.is_dir():
+                    if info.is_dir():
+                        continue
+                    ext_in = Path(info.filename).suffix.lower()
+                    if ext_in in LOSSLESS_OK:
                         member = info
                         break
                 if member is None:
-                    raise ValueError("ZIP vacío.")
+                    raise ValueError("ZIP sin audios compatibles (usa WAV/FLAC/OGG/AIFF).")
                 data = z.read(member)
-                # guardar con su extensión real (si no, .bin)
-                ext2 = Path(member.filename).suffix.lower() or ".bin"
+                ext2 = Path(member.filename).suffix.lower()
                 tmp_path = save_temp_bytes(data, ext2)
             except Exception as e:
                 if debug_mode: st.exception(e)
                 st.error(f"No se pudo leer el ZIP: {e}")
                 st.stop()
         else:
-            # Guardar tal cual, sin filtrar por extensión
-            tmp_path = save_temp_bytes(raw, ext if ext else ".bin")
+            # Filtrado de formatos por entorno (sin ffmpeg)
+            if ext in LOSSY_BLOCK:
+                st.error("Este entorno no puede decodificar MP3/M4A/AAC. Convierte a WAV/FLAC/OGG/AIFF e inténtalo de nuevo.")
+                st.stop()
+            if ext not in LOSSLESS_OK:
+                st.error(f"Formato no soportado ({ext or 'desconocido'}). Usa WAV/FLAC/OGG/AIFF o ZIP con audio.")
+                st.stop()
+            tmp_path = save_temp_bytes(raw, ext)
 
-        # Mostrar player si el host lo soporta
+        # Player (no bloquear si falla)
         try:
             st.audio(tmp_path)
         except Exception as e:
             if debug_mode: st.warning(f"Player no disponible: {e}")
+
+        # Depuración de entrada
+        if debug_mode:
+            st.write({"name": name, "ext": ext, "bytes": len(raw)})
+            import soundfile as sf
+            try:
+                y_sf, sr_sf = sf.read(tmp_path, always_2d=False)
+                st.success(f"[soundfile] OK — sr={sr_sf}, shape={np.shape(y_sf)}")
+            except Exception as e:
+                st.error(f"[soundfile] ERROR: {e}")
+            try:
+                y_lb, sr_lb = librosa.load(tmp_path, sr=SR, mono=True)
+                st.success(f"[librosa] OK — sr={sr_lb}, len={len(y_lb)}")
+            except Exception as e:
+                st.error(f"[librosa] ERROR: {e}")
 
     elif input_mode == "Pegar URL":
         url = st.text_input("Pega una URL directa (audio o ZIP con audio):")
@@ -149,25 +179,39 @@ try:
         r = requests.get(url, timeout=30)
         r.raise_for_status()
         ext = Path(url.split("?")[0]).suffix.lower()
+
         if ext == ".zip":
             z = zipfile.ZipFile(io.BytesIO(r.content))
             member = None
             for info in z.infolist():
-                if not info.is_dir():
+                if info.is_dir():
+                    continue
+                ext_in = Path(info.filename).suffix.lower()
+                if ext_in in LOSSLESS_OK:
                     member = info
                     break
             if member is None:
-                st.error("ZIP vacío.")
+                st.error("ZIP sin audios compatibles (usa WAV/FLAC/OGG/AIFF).")
                 st.stop()
             data = z.read(member)
-            ext2 = Path(member.filename).suffix.lower() or ".bin"
+            ext2 = Path(member.filename).suffix.lower()
             tmp_path = save_temp_bytes(data, ext2)
         else:
-            tmp_path = save_temp_bytes(r.content, ext if ext else ".bin")
+            if ext in LOSSY_BLOCK:
+                st.error("Este entorno no puede decodificar MP3/M4A/AAC desde URL. Usa WAV/FLAC/OGG/AIFF o ZIP.")
+                st.stop()
+            if ext not in LOSSLESS_OK:
+                st.error(f"Extensión no soportada en URL ({ext or 'desconocida'}). Usa WAV/FLAC/OGG/AIFF o ZIP.")
+                st.stop()
+            tmp_path = save_temp_bytes(r.content, ext)
+
         try:
             st.audio(tmp_path)
         except Exception as e:
             if debug_mode: st.warning(f"Player no disponible: {e}")
+
+        if debug_mode:
+            st.write({"url": url, "ext": ext, "bytes": len(r.content)})
 
     else:  # Demo interna 5 s
         y = generate_demo_wave(SR, 5.0)
@@ -179,7 +223,7 @@ try:
 
 except Exception as up_e:
     if debug_mode: st.exception(up_e)
-    st.error("No se pudo recibir el audio. Prueba la **Demo (5 s)** o una **URL**.")
+    st.error("No se pudo recibir el audio. Prueba la **Demo (5 s)** o una **URL/ZIP** con WAV/FLAC/OGG/AIFF.")
     st.stop()
 
 # ---------- Inferencia ----------
@@ -247,11 +291,10 @@ with tab1:
 
 with tab2:
     st.subheader("📈 Probabilidades por segmento")
-    timeline_df = pd.DataFrame({
-        "t_inicio_s": starts_s,
-        LABELS[0]: probs_per_window[:, 0],
-        LABELS[1]: probs_per_window[:, 1],
-    })
+    # Nota: para 2 clases; si amplías LABELS, genera columnas dinámicas
+    timeline_df = pd.DataFrame({"t_inicio_s": starts_s})
+    for i, lab in enumerate(LABELS):
+        timeline_df[lab] = probs_per_window[:, i]
     st.line_chart(timeline_df.set_index("t_inicio_s"))
     st.caption("Se promedian las probabilidades para la predicción global.")
     st.download_button("⬇️ CSV de probabilidades", timeline_df.to_csv(index=False).encode("utf-8"),
