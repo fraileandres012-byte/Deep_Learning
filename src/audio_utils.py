@@ -8,7 +8,7 @@ import soundfile as sf
 SR = 22050
 N_MELS = 128
 FIXED_TIME_FRAMES = 431
-LABELS = ["makina", "newstyle"]
+LABELS = ["makina", "newstyle"]  # amplía aquí cuando añadas más estilos
 
 # --- Loader robusto ---
 def safe_load_path(path, sr=SR, mono=True):
@@ -24,7 +24,6 @@ def safe_load_path(path, sr=SR, mono=True):
             data = librosa.resample(data.astype(np.float32), orig_sr=srf, target_sr=sr)
         return data.astype(np.float32), sr
     except Exception:
-        # Fallback genérico (MP3/otros contenedores): librosa/audioread
         y, _ = librosa.load(path, sr=sr, mono=mono)
         return y.astype(np.float32), sr
 
@@ -96,7 +95,7 @@ def compute_basic_features(y, sr=SR):
     rolloff = librosa.feature.spectral_rolloff(y=y, sr=sr, roll_percent=0.85)
     zcr = librosa.feature.zero_crossing_rate(y)
     return {
-        "bpm": float(tempo),
+        "bpm": float(np.asarray(tempo).squeeze()),
         "spectral_centroid_hz": float(np.mean(centroid)),
         "spectral_rolloff_hz": float(np.mean(rolloff)),
         "zcr": float(np.mean(zcr)),
@@ -117,7 +116,7 @@ def gradcam_heatmap(model, x, conv_layer_name, class_index, upsample_to=(N_MELS,
         [model.inputs], [model.get_layer(conv_layer_name).output, model.output]
     )
     with tf.GradientTape() as tape:
-        conv_output, preds = grad_model(x)
+        conv_output, preds = grad_model(x, training=False)
         if class_index is None:
             class_index = tf.argmax(preds[0])
         class_channel = preds[:, class_index]
