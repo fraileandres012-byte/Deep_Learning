@@ -1,12 +1,10 @@
-# requirements.txt
 streamlit>=1.23
 numpy
 pandas
 librosa>=0.10
 audioread
 soundfile
-scikit-learn
-tqdm
 tensorflow
 matplotlib
 requests
+h5py
