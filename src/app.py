@@ -93,7 +93,11 @@ if model is None:
     st.stop()
 
 # ---------- Entrada de audio: Archivo / URL / Demo interna (AJUSTE ROBUSTO) ----------
-input_mode = st.radio("Cómo quieres cargar el audio:", ["Subir archivo", "Pegar URL", "Usar demo (5 s)"], horizontal=True)
+if st.button("🎵 Probar demo (5 s)"):
+    st.session_state["force_demo"] = True
+if st.session_state.get("force_demo"):
+    input_mode = "Usar demo (5 s)"
+
 tmp_path = None
 
 # Formatos soportados SIN ffmpeg (Streamlit Cloud)
